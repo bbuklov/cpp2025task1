@@ -21,6 +21,19 @@
 - Section C — loops:
   - `L` as VarUInt, then `L` entries of `{ vertex_delta (VarUInt), weight (1 byte) }`, where `vertex_delta` is delta from previous loop vertex (start at 0).
 
+## Binary format (compact, LE, version 2)
+- Header:
+  - Magic `GRPH` (4B), `version=2` (1B), `endian=1` for little-endian (1B)
+  - `N` (VarUInt), `M` (VarUInt) — vertices and edges total (loops included)
+- Section A — mapping if N>0: [uint32 first_original_id]; then for i=1..N-1: delta_i = orig[i]-orig[i-1] as VarUInt
+- Section B — "upper" adjacency (CSR-like): for each vertex `i=0..N-1`
+  - `deg_plus(i)` as VarUInt
+  - For each neighbor `j>i` in ascending order:
+    - `gap = j - prev` (VarUInt), `prev` starts at `i`
+    - `weight` (1 byte)
+- Section C — loops:
+  - `L` as VarUInt, then `L` entries of `{ vertex_delta (VarUInt), weight (1 byte) }`, where `vertex_delta` is delta from previous loop vertex (start at 0).
+
 ## Build
 ```bash
 g++ -O3 -std=gnu++17 run.cpp -o run

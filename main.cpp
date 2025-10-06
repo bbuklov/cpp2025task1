@@ -18,6 +18,18 @@
 //           vertex_delta: VarUInt (delta from the previous loop vertex, starting at 0)
 //           weight: 1 byte
 //
+// Binary format (LE, version 2) -- backward compatible reader:
+//   [4B magic 'GRPH'][1B version=2][1B endian=1 (little)]
+//   [VarUInt N][VarUInt M]  // N vertices; M total edges (including self-loops)
+//   Section A: mapping newId->originalId:
+//       if N>0: [uint32 first_original_id]; then for i=1..N-1: delta_i = orig[i]-orig[i-1] as VarUInt
+//   Section B: (same as v1)
+//       for each vertex i=0..N-1:
+//         deg_plus(i): VarUInt; then for each neighbor j>i:
+//           gap = j - prev (prev=i), as VarUInt; weight: 1 byte
+//   Section C (loops): (same as v1)
+//       L: VarUInt; entries: [vertex_delta: VarUInt][weight:1B]
+//
 // Notes:
 // - Input TSV: u \t v \t w, where u,v: uint32 and w: 0..255 (uint8); the graph is undirected.
 // - During serialization each edge is stored exactly once as (min(u,v), max(u,v)).
@@ -200,9 +212,9 @@ struct Serializer {
         
         if (line_cnt==0){ // empty graph
             BinWriter bw(out_path);
-            // header
-            bw.write("GRPH",4); bw.put(1); bw.put(1); // version, endian
-            bw.u32le(0); bw.u64le(0); // N, M
+            // header (v2)
+            bw.write("GRPH",4); bw.put(2); bw.put(1); // version=2, endian
+            bw.varu(0); bw.varu(0); // N, M
             // no mapping, no adj, no loops
             return;
         }
@@ -272,14 +284,20 @@ struct Serializer {
 
         // Write binary file
         BinWriter bw(out_path);
-        // header
-        bw.write("GRPH",4); bw.put(1); bw.put(1); // version=1, endian=1(little)
-        bw.u32le(N);
+        // header (v2)
+        bw.write("GRPH",4); bw.put(2); bw.put(1); // version=2, little-endian
+        bw.varu(N);
         uint64_t M_total = M_noLoops + loops.size();
-        bw.u64le(M_total);
+        bw.varu(M_total);
 
-        // mapping newId->originalId
-        for (uint32_t i=0;i<N;++i) bw.u32le(uniq[i]);
+        // mapping newId->originalId (delta + VarUInt)
+        if (N>0){
+            bw.u32le(uniq[0]);
+            for (uint32_t i=1;i<N;++i){
+                uint32_t d = uniq[i] - uniq[i-1];
+                bw.varu(d);
+            }
+        }
 
         // upper adjacency lists with varints and 1B weights
         for (uint32_t i=0;i<N;++i){
@@ -323,14 +341,32 @@ struct Deserializer {
         // header
         if (!(br.has(4))) die("no magic");
         if (br.get()!='G' || br.get()!='R' || br.get()!='P' || br.get()!='H') die("bad magic, expected 'GRPH'");
-        uint8_t version = br.get(); if (version!=1) die("unsupported version");
+        uint8_t version = br.get(); if (version!=1 && version!=2) die("unsupported version");
         uint8_t endian = br.get(); if (endian!=1) die("unsupported endianness (only little-endian=1)");
-        uint32_t N = br.u32le();
-        uint64_t M_total = br.u64le(); (void)M_total;
+        uint32_t N = 0;
+        uint64_t M_total = 0;
+        if (version==1){
+            N = br.u32le();
+            M_total = br.u64le(); (void)M_total;
+        } else {
+            N = (uint32_t)br.varu();
+            M_total = br.varu(); (void)M_total;
+        }
 
         // mapping
         vector<uint32_t> orig_of(N);
-        for (uint32_t i=0;i<N;++i) orig_of[i] = br.u32le();
+        if (version==1){
+            for (uint32_t i=0;i<N;++i) orig_of[i] = br.u32le();
+        } else {
+            if (N>0){
+                uint32_t first = br.u32le();
+                orig_of[0] = first;
+                for (uint32_t i=1;i<N;++i){
+                    uint64_t d = br.varu();
+                    orig_of[i] = orig_of[i-1] + (uint32_t)d;
+                }
+            }
+        }
 
         // output TSV
         TextWriter tw(out_path);
